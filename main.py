@@ -27,6 +27,12 @@ OBSTACLE = (83, 88, 82)
 OBSTACLE_EDGE = (125, 132, 124)
 TEXT = (236, 241, 235)
 YELLOW = (245, 204, 84)
+STONE = (124, 130, 130)
+STONE_DARK = (76, 82, 82)
+MONSTER_MAX_HP = 200
+MONSTER_START_TIMER = 999999.0
+STONE_TRANSITION_TIME = 5.0
+MONSTER_REGEN_INTERVAL = 1.5
 
 DIRS = {
     pygame.K_UP: pygame.Vector2(0, -1),
@@ -122,6 +128,9 @@ class Tank:
         self.rocket_cooldown = 0.0
         self.bile_cooldown = 0.0
         self.life_timer = 28.0 if temporary else 0.0
+        self.monster_regen_timer = 0.0
+        self.stone_mode = False
+        self.stone_transition = 0.0
 
     @property
     def alive(self):
@@ -150,6 +159,8 @@ class Tank:
             speed *= 3.35
         if self.monster_timer > 0:
             speed *= 0.82
+        if self.stone_mode or self.stone_transition > 0:
+            return 0.0
         return speed
 
     @property
@@ -184,6 +195,20 @@ class Tank:
         if was_monster and self.monster_timer <= 0:
             self.max_hp = 4
             self.hp = min(self.hp, self.max_hp)
+        if self.monster_timer > 0:
+            self.monster_regen_timer += dt
+            while self.monster_regen_timer >= MONSTER_REGEN_INTERVAL:
+                self.monster_regen_timer -= MONSTER_REGEN_INTERVAL
+                if self.hp > 0:
+                    self.hp = min(self.max_hp, self.hp + 1)
+        else:
+            self.monster_regen_timer = 0.0
+
+        if self.stone_transition > 0:
+            self.stone_transition = max(0.0, self.stone_transition - dt)
+            if self.stone_transition <= 0 and not self.stone_mode:
+                self.stone_mode = True
+
         if self.temporary and not self.permanent_helper:
             self.life_timer -= dt
 
@@ -218,6 +243,16 @@ class Tank:
         pygame.draw.circle(body, (34, 39, 38, alpha), center, max(8, rect.width // 5))
 
         surface.blit(body, rect)
+
+        if self.stone_mode or self.stone_transition > 0:
+            phase = 1.0 if self.stone_mode else 1.0 - (self.stone_transition / STONE_TRANSITION_TIME)
+            stone = pygame.Surface(rect.size, pygame.SRCALPHA)
+            pygame.draw.rect(stone, (*STONE, int(60 + 140 * phase)), stone.get_rect(), border_radius=4)
+            crack_count = 3 + int(phase * 8)
+            for i in range(crack_count):
+                y = int((i + 1) * rect.height / (crack_count + 1))
+                pygame.draw.line(stone, (*STONE_DARK, int(120 + 90 * phase)), (3, y), (rect.width - 3, max(3, y - 4)), 1)
+            surface.blit(stone, rect)
 
         active_effects = [
             (self.ghost_timer, (126, 216, 255)),
@@ -281,9 +316,19 @@ class Tank:
         pygame.draw.rect(surface, (25, 25, 25), hp_back)
         pygame.draw.rect(surface, (91, 225, 111), (hp_back.x, hp_back.y, int(hp_w * self.hp / self.max_hp), 5))
 
+        labels = []
         if self.is_player:
-            label = font.render("ИГРОК", True, TEXT)
-            surface.blit(label, (rect.centerx - label.get_width() // 2, rect.bottom + 4))
+            labels.append(("ИГРОК", TEXT))
+        if self.monster_timer > 0:
+            if self.stone_mode:
+                labels.append(("КАМЕНЬ", STONE))
+            elif self.stone_transition > 0:
+                labels.append((f"ОКАМЕНЕНИЕ {math.ceil(self.stone_transition)}", STONE))
+            else:
+                labels.append(("МОНСТР", (203, 92, 255)))
+        for index, (text, label_color) in enumerate(labels):
+            label = font.render(text, True, label_color)
+            surface.blit(label, (rect.centerx - label.get_width() // 2, rect.bottom + 4 + index * 18))
 
 
 class Game:
@@ -336,7 +381,14 @@ class Game:
             (WORLD_WIDTH - 380, WORLD_HEIGHT - 410),
             (WORLD_WIDTH - 560, WORLD_HEIGHT - 280),
         ]
-        self.tanks.append(Tank(BLUE, blue_spawns[0], is_player=True))
+        player_tank = Tank(BLUE, blue_spawns[0], is_player=True)
+        player_tank.monster_timer = MONSTER_START_TIMER
+        player_tank.monster_permanent = True
+        player_tank.max_hp = MONSTER_MAX_HP
+        player_tank.hp = MONSTER_MAX_HP
+        self.tanks.append(player_tank)
+        self.spawn_powerup_burst(player_tank.pos, "monster")
+        self.flash("Игрок получил Монстра до первой смерти. G — окаменение")
         for pos in blue_spawns[1:]:
             self.tanks.append(Tank(BLUE, pos))
         for pos in red_spawns:
@@ -366,6 +418,8 @@ class Game:
                 self.try_fire_rocket(self.player)
             if event.type == pygame.KEYDOWN and event.key == pygame.K_f:
                 self.try_spray_bile(self.player)
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_g:
+                self.toggle_stone_mode(self.player)
 
     def update(self, dt):
         keys = pygame.key.get_pressed()
@@ -396,7 +450,13 @@ class Game:
         self.message_timer = max(0.0, self.message_timer - dt)
 
     def update_ai(self, tank, dt):
-        enemies = [t for t in self.tanks if t.team != tank.team and t.alive]
+        if tank.stone_mode or tank.stone_transition > 0:
+            return
+        enemies = [
+            t
+            for t in self.tanks
+            if t.team != tank.team and t.alive and not self.is_stone_wall(t)
+        ]
         if not enemies:
             return
 
@@ -583,6 +643,12 @@ class Game:
                 best_direction = direction
         return best_direction
 
+    def is_stone_wall(self, tank):
+        return tank.alive and tank.monster_timer > 0 and tank.stone_mode
+
+    def stone_walls(self, exclude=None):
+        return [tank for tank in self.tanks if tank is not exclude and self.is_stone_wall(tank)]
+
     def can_tank_step(self, tank, direction, distance):
         future_pos = tank.pos + direction * distance
         half = tank.size / 2
@@ -625,7 +691,22 @@ class Game:
                 return False
         return True
 
+    def toggle_stone_mode(self, tank):
+        if not tank.alive or tank.monster_timer <= 0:
+            return
+        if tank.stone_mode:
+            tank.stone_mode = False
+            tank.stone_transition = 0.0
+            self.flash("Монстр раскаменел")
+            return
+        if tank.stone_transition > 0:
+            return
+        tank.stone_transition = STONE_TRANSITION_TIME
+        self.flash(f"Окаменение началось ({int(STONE_TRANSITION_TIME)}с)")
+
     def try_shoot(self, tank):
+        if tank.stone_mode or tank.stone_transition > 0:
+            return
         if not tank.alive or tank.cooldown > 0:
             return
 
@@ -635,6 +716,8 @@ class Game:
         tank.cooldown = tank.shoot_delay
 
     def try_monster_teleport(self, tank):
+        if tank.stone_mode or tank.stone_transition > 0:
+            return
         if not tank.alive or tank.monster_timer <= 0 or tank.teleport_cooldown > 0:
             return
 
@@ -652,6 +735,8 @@ class Game:
                 return
 
     def try_fire_rocket(self, tank):
+        if tank.stone_mode or tank.stone_transition > 0:
+            return
         if not tank.alive or tank.monster_timer <= 0 or tank.rocket_cooldown > 0:
             return
 
@@ -671,6 +756,8 @@ class Game:
         self.spawn_energy_ring(muzzle, (255, 101, 81), 18)
 
     def try_spray_bile(self, tank):
+        if tank.stone_mode or tank.stone_transition > 0:
+            return
         if not tank.alive or tank.monster_timer <= 0 or tank.bile_cooldown > 0:
             return
 
@@ -741,7 +828,9 @@ class Game:
                 self.remove_bullet(bullet)
                 continue
 
-            if any(bullet.rect.colliderect(obstacle) for obstacle in self.obstacles):
+            hit_world_wall = any(bullet.rect.colliderect(obstacle) for obstacle in self.obstacles)
+            hit_stone_wall = any(bullet.rect.colliderect(wall.rect) for wall in self.stone_walls())
+            if hit_world_wall or hit_stone_wall:
                 if bullet.kind == "rocket":
                     self.detonate_rocket(bullet)
                 self.remove_bullet(bullet)
@@ -765,7 +854,7 @@ class Game:
         self.spawn_energy_ring(rocket.pos, (255, 82, 64), 60)
         self.spawn_energy_ring(rocket.pos, (255, 225, 105), 34)
         for tank in list(self.tanks):
-            if not tank.alive or tank.team == rocket.team:
+            if not tank.alive or tank.team == rocket.team or self.is_stone_wall(tank):
                 continue
             distance = tank.pos.distance_to(rocket.pos)
             if distance > rocket.splash_radius + tank.size / 2:
@@ -818,6 +907,9 @@ class Game:
                 tank.teleport_cooldown = 0
                 tank.rocket_cooldown = 0
                 tank.bile_cooldown = 0
+                tank.stone_mode = False
+                tank.stone_transition = 0
+                tank.monster_regen_timer = 0
                 tank.pos = self.find_spawn(tank.team)
                 tank.direction = pygame.Vector2(0, -1 if tank.team == BLUE else 1)
 
@@ -871,10 +963,10 @@ class Game:
             tank.max_hp = max(tank.max_hp, 10)
             tank.hp = min(tank.max_hp, tank.hp + 4)
         elif kind == "monster":
-            tank.monster_timer = 999999.0
+            tank.monster_timer = MONSTER_START_TIMER
             tank.monster_permanent = True
-            tank.max_hp = max(tank.max_hp, 200)
-            tank.hp = 200
+            tank.max_hp = max(tank.max_hp, MONSTER_MAX_HP)
+            tank.hp = MONSTER_MAX_HP
             tank.teleport_cooldown = 0
             tank.rocket_cooldown = 0
             tank.bile_cooldown = 0
@@ -997,6 +1089,8 @@ class Game:
             probe = pygame.Rect(int(point.x - 3), int(point.y - 3), 6, 6)
             if any(probe.colliderect(obstacle) for obstacle in self.obstacles):
                 return False
+            if any(probe.colliderect(wall.rect) for wall in self.stone_walls()):
+                return False
         return True
 
     def camera(self):
@@ -1100,10 +1194,21 @@ class Game:
         self.screen.blit(score, (24, 11))
 
         hp = self.font.render(f"Здоровье: {self.player.hp}/{self.player.max_hp}", True, TEXT)
-        self.screen.blit(hp, (430, 17))
+        self.screen.blit(hp, (380, 6))
 
-        next_power = self.font.render(f"Усиление через: {max(0, int(self.powerup_timer))} c", True, TEXT)
-        self.screen.blit(next_power, (570, 17))
+        monster_state = "нет"
+        if self.player.monster_timer > 0:
+            if self.player.stone_mode:
+                monster_state = "камень (G — выйти)"
+            elif self.player.stone_transition > 0:
+                monster_state = f"окаменение {math.ceil(self.player.stone_transition)}с"
+            else:
+                monster_state = "активен (G — камень)"
+        monster = self.font.render(f"Монстр: {monster_state}", True, (203, 92, 255) if self.player.monster_timer > 0 else TEXT)
+        self.screen.blit(monster, (380, 29))
+
+        next_power = self.font.render(f"Усиление: {max(0, int(self.powerup_timer))} c", True, TEXT)
+        self.screen.blit(next_power, (690, 17))
 
         if self.message_timer > 0:
             msg = self.font.render(self.message, True, YELLOW)
