@@ -33,6 +33,9 @@ MONSTER_MAX_HP = 200
 MONSTER_START_TIMER = 999999.0
 STONE_TRANSITION_TIME = 5.0
 MONSTER_REGEN_INTERVAL = 1.5
+POWERUP_CHANNEL_TIME = 5.0
+STONE_RESIZE_STEP = 18
+STONE_MIN_SIZE = 34
 
 DIRS = {
     pygame.K_UP: pygame.Vector2(0, -1),
@@ -85,6 +88,13 @@ class PowerUp:
 
 
 @dataclass
+class PowerupChannel:
+    caster: object
+    target: PowerUp
+    timer: float = 0.0
+
+
+@dataclass
 class PowerUpParticle:
     pos: pygame.Vector2
     vel: pygame.Vector2
@@ -131,6 +141,7 @@ class Tank:
         self.monster_regen_timer = 0.0
         self.stone_mode = False
         self.stone_transition = 0.0
+        self.stone_rect = None
 
     @property
     def alive(self):
@@ -141,7 +152,7 @@ class Tank:
         return 52 if self.monster_timer > 0 else 38
 
     @property
-    def rect(self):
+    def base_rect(self):
         size = self.size
         return pygame.Rect(
             int(self.pos.x - size / 2),
@@ -149,6 +160,12 @@ class Tank:
             size,
             size,
         )
+
+    @property
+    def rect(self):
+        if self.stone_mode and self.stone_rect is not None:
+            return self.stone_rect.copy()
+        return self.base_rect
 
     @property
     def current_speed(self):
@@ -207,6 +224,7 @@ class Tank:
         if self.stone_transition > 0:
             self.stone_transition = max(0.0, self.stone_transition - dt)
             if self.stone_transition <= 0 and not self.stone_mode:
+                self.stone_rect = self.base_rect.copy()
                 self.stone_mode = True
 
         if self.temporary and not self.permanent_helper:
@@ -218,6 +236,14 @@ class Tank:
 
         rect = self.rect.move(-camera.x, -camera.y + HUD_HEIGHT)
         now = pygame.time.get_ticks() / 1000.0
+        if self.stone_mode:
+            pygame.draw.rect(surface, OBSTACLE, rect, border_radius=5)
+            pygame.draw.rect(surface, OBSTACLE_EDGE, rect, 3, border_radius=5)
+            for y in range(rect.top + 12, rect.bottom - 6, 18):
+                pygame.draw.line(surface, STONE_DARK, (rect.left + 6, y), (rect.right - 6, y - 5), 1)
+            pulse = 0.5 + 0.5 * math.sin(now * 5.0)
+            pygame.draw.rect(surface, (155, 255, 122), rect.inflate(int(5 + pulse * 5), int(5 + pulse * 5)), 1, border_radius=6)
+            return
         if self.army_inflate_timer > 0:
             progress = 1.0 - self.army_inflate_timer / 1.45
             pulse = 0.5 + 0.5 * math.sin(now * 22.0)
@@ -346,6 +372,7 @@ class Game:
         self.bullets = []
         self.powerups = []
         self.powerup_particles = []
+        self.powerup_channel = None
         self.blue_kills = 0
         self.red_kills = 0
         self.powerup_timer = 3.0
@@ -420,6 +447,10 @@ class Game:
                 self.try_spray_bile(self.player)
             if event.type == pygame.KEYDOWN and event.key == pygame.K_g:
                 self.toggle_stone_mode(self.player)
+            if event.type == pygame.KEYDOWN:
+                self.handle_stone_resize_key(event)
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                self.try_start_powerup_channel(event.pos)
 
     def update(self, dt):
         keys = pygame.key.get_pressed()
@@ -447,6 +478,7 @@ class Game:
         self.update_respawns(dt)
         self.update_powerups(dt)
         self.update_powerup_particles(dt)
+        self.update_powerup_channel(dt)
         self.message_timer = max(0.0, self.message_timer - dt)
 
     def update_ai(self, tank, dt):
@@ -691,12 +723,69 @@ class Game:
                 return False
         return True
 
+
+    def handle_stone_resize_key(self, event):
+        directions = {
+            pygame.K_1: pygame.Vector2(0, -1),
+            pygame.K_2: pygame.Vector2(1, -1),
+            pygame.K_3: pygame.Vector2(1, 0),
+            pygame.K_4: pygame.Vector2(1, 1),
+            pygame.K_5: pygame.Vector2(0, 1),
+            pygame.K_6: pygame.Vector2(-1, 1),
+            pygame.K_7: pygame.Vector2(-1, 0),
+            pygame.K_8: pygame.Vector2(-1, -1),
+            pygame.K_KP1: pygame.Vector2(0, -1),
+            pygame.K_KP2: pygame.Vector2(1, -1),
+            pygame.K_KP3: pygame.Vector2(1, 0),
+            pygame.K_KP4: pygame.Vector2(1, 1),
+            pygame.K_KP5: pygame.Vector2(0, 1),
+            pygame.K_KP6: pygame.Vector2(-1, 1),
+            pygame.K_KP7: pygame.Vector2(-1, 0),
+            pygame.K_KP8: pygame.Vector2(-1, -1),
+        }
+        if event.key not in directions:
+            return
+        expand = not (pygame.key.get_mods() & pygame.KMOD_SHIFT)
+        self.adjust_stone_wall(self.player, directions[event.key], expand)
+
+    def adjust_stone_wall(self, tank, direction, expand=True):
+        if not self.is_stone_wall(tank):
+            return
+
+        rect = tank.rect
+        step = STONE_RESIZE_STEP if expand else -STONE_RESIZE_STEP
+        if direction.x < 0:
+            rect.left -= step
+        elif direction.x > 0:
+            rect.right += step
+        if direction.y < 0:
+            rect.top -= step
+        elif direction.y > 0:
+            rect.bottom += step
+
+        rect.normalize()
+        if rect.width < STONE_MIN_SIZE or rect.height < STONE_MIN_SIZE:
+            self.flash("Каменная стена уже минимальна")
+            return
+        if rect.left < 0 or rect.top < 0 or rect.right > WORLD_WIDTH or rect.bottom > WORLD_HEIGHT:
+            self.flash("Граница мира не даёт изменить стену")
+            return
+        if any(rect.colliderect(other.rect) for other in self.tanks if other is not tank and other.alive):
+            self.flash("Нельзя расширить стену сквозь танк")
+            return
+
+        tank.stone_rect = rect
+        tank.pos = pygame.Vector2(rect.center)
+        action = "расширилась" if expand else "сжалась"
+        self.flash(f"Каменная стена {action}")
+
     def toggle_stone_mode(self, tank):
         if not tank.alive or tank.monster_timer <= 0:
             return
         if tank.stone_mode:
             tank.stone_mode = False
             tank.stone_transition = 0.0
+            tank.stone_rect = None
             self.flash("Монстр раскаменел")
             return
         if tank.stone_transition > 0:
@@ -927,8 +1016,117 @@ class Game:
                 continue
             for powerup in list(self.powerups):
                 if tank.rect.colliderect(powerup.rect):
-                    self.apply_powerup(tank, powerup.kind)
-                    self.powerups.remove(powerup)
+                    self.collect_powerup(tank, powerup)
+
+
+    def collect_powerup(self, tank, powerup):
+        channel = self.powerup_channel
+        if channel is not None and channel.target is powerup and tank is not channel.caster:
+            self.apply_powerup(tank, powerup.kind)
+            if powerup in self.powerups:
+                self.powerups.remove(powerup)
+            self.possess_tank(channel.caster, tank)
+            self.powerup_channel = None
+            self.flash("Монстр вселился в танк, перехвативший усиление")
+            return
+
+        self.apply_powerup(tank, powerup.kind)
+        if powerup in self.powerups:
+            self.powerups.remove(powerup)
+        if channel is not None and channel.target is powerup:
+            self.powerup_channel = None
+
+    def possess_tank(self, caster, host):
+        for tank in self.tanks:
+            tank.is_player = False
+        host.is_player = True
+        host.monster_timer = MONSTER_START_TIMER
+        host.monster_permanent = True
+        host.max_hp = max(host.max_hp, MONSTER_MAX_HP)
+        host.hp = max(host.hp, min(MONSTER_MAX_HP, host.max_hp))
+        host.teleport_cooldown = 0.0
+        host.rocket_cooldown = 0.0
+        host.bile_cooldown = 0.0
+        host.stone_mode = False
+        host.stone_transition = 0.0
+        host.stone_rect = None
+        if caster is not host:
+            caster.monster_permanent = False
+            caster.monster_timer = 0.0
+            caster.stone_mode = False
+            caster.stone_transition = 0.0
+            caster.stone_rect = None
+        self.spawn_energy_ring(host.pos, (203, 92, 255), 96)
+        self.spawn_energy_ring(host.pos, (147, 255, 83), 64)
+
+    def minimap_rect(self):
+        width, height = 190, 140
+        left = SCREEN_WIDTH - width - 18
+        top = SCREEN_HEIGHT - height - 18
+        return pygame.Rect(left, top, width, height)
+
+    def try_start_powerup_channel(self, mouse_pos):
+        player = self.player
+        if not player.alive or player.monster_timer <= 0 or not self.powerups:
+            return
+        minimap = self.minimap_rect()
+        if not minimap.collidepoint(mouse_pos):
+            return
+
+        world_pos = pygame.Vector2(
+            (mouse_pos[0] - minimap.left) / minimap.width * WORLD_WIDTH,
+            (mouse_pos[1] - minimap.top) / minimap.height * WORLD_HEIGHT,
+        )
+        target = min(self.powerups, key=lambda powerup: pygame.Vector2(powerup.rect.center).distance_squared_to(world_pos))
+        if pygame.Vector2(target.rect.center).distance_to(world_pos) > 135:
+            self.flash("На миникарте нажмите прямо на усиление")
+            return
+
+        self.powerup_channel = PowerupChannel(player, target)
+        self.flash(f"Монстр тянет {POWERUP_INFO[target.kind][0]} через стены ({int(POWERUP_CHANNEL_TIME)}с)")
+
+    def update_powerup_channel(self, dt):
+        channel = self.powerup_channel
+        if channel is None:
+            return
+        if not channel.caster.alive or channel.caster.monster_timer <= 0 or channel.target not in self.powerups:
+            self.powerup_channel = None
+            return
+
+        channel.timer += dt
+        caster_pos = channel.caster.pos
+        target_pos = pygame.Vector2(channel.target.rect.center)
+        direction = target_pos - caster_pos
+        if direction.length_squared() > 0:
+            direction = direction.normalize()
+        else:
+            direction = pygame.Vector2(0, -1)
+        for _ in range(5):
+            t = random.random()
+            jitter = pygame.Vector2(-direction.y, direction.x) * random.uniform(-22, 22) * (1.0 - abs(t - 0.5))
+            pos = caster_pos.lerp(target_pos, t) + jitter
+            vel = (caster_pos - pos) * random.uniform(0.35, 0.9)
+            self.powerup_particles.append(
+                PowerUpParticle(
+                    pos,
+                    vel,
+                    (203, 92, 255),
+                    random.uniform(0.18, 0.38),
+                    0.38,
+                    random.uniform(2.0, 4.5),
+                    drag=0.86,
+                )
+            )
+
+        if channel.timer >= POWERUP_CHANNEL_TIME:
+            target = channel.target
+            if target in self.powerups:
+                self.powerups.remove(target)
+            for kind in POWERUP_INFO:
+                self.apply_powerup(channel.caster, kind)
+            self.spawn_energy_ring(target_pos, (203, 92, 255), 88)
+            self.powerup_channel = None
+            self.flash("Монстр вытянул силу и получил все улучшения")
 
     def update_powerup_particles(self, dt):
         for particle in list(self.powerup_particles):
@@ -1151,6 +1349,8 @@ class Game:
                 label = self.font.render(name, True, TEXT)
                 self.screen.blit(label, (rect.centerx - label.get_width() // 2, rect.bottom + 5))
 
+        self.draw_powerup_channel(camera, world_view)
+
         for particle in self.powerup_particles:
             if world_view.collidepoint(particle.pos):
                 life_ratio = max(0.0, particle.life / particle.max_life)
@@ -1186,6 +1386,41 @@ class Game:
 
         self.draw_minimap(camera)
 
+
+    def draw_powerup_channel(self, camera, world_view):
+        channel = self.powerup_channel
+        if channel is None or channel.target not in self.powerups or not channel.caster.alive:
+            return
+        start = channel.caster.pos
+        end = pygame.Vector2(channel.target.rect.center)
+        if not (world_view.collidepoint(start) or world_view.collidepoint(end) or world_view.clipline(start, end)):
+            return
+
+        progress = min(1.0, channel.timer / POWERUP_CHANNEL_TIME)
+        now = pygame.time.get_ticks() / 1000.0
+        start_screen = pygame.Vector2(start.x - camera.x, start.y - camera.y + HUD_HEIGHT)
+        end_screen = pygame.Vector2(end.x - camera.x, end.y - camera.y + HUD_HEIGHT)
+        direction = end_screen - start_screen
+        if direction.length_squared() > 0:
+            normal = pygame.Vector2(-direction.y, direction.x).normalize()
+        else:
+            normal = pygame.Vector2(0, 1)
+
+        points = []
+        for i in range(22):
+            t = i / 21
+            wave = math.sin(now * 9.0 + t * math.tau * 4.0) * (8 + 10 * progress)
+            points.append(start_screen.lerp(end_screen, t) + normal * wave)
+        pygame.draw.lines(self.screen, (83, 255, 144), False, points, 7)
+        pygame.draw.lines(self.screen, (203, 92, 255), False, points, 4)
+        pygame.draw.lines(self.screen, (245, 246, 220), False, points, 1)
+
+        target_rect = channel.target.rect.move(-camera.x, -camera.y + HUD_HEIGHT)
+        halo = target_rect.inflate(34 + int(progress * 50), 34 + int(progress * 50))
+        pygame.draw.ellipse(self.screen, (203, 92, 255), halo, 3)
+        label = self.font.render(f"{max(0.0, POWERUP_CHANNEL_TIME - channel.timer):.1f}с", True, (245, 246, 220))
+        self.screen.blit(label, (target_rect.centerx - label.get_width() // 2, target_rect.top - 24))
+
     def draw_hud(self):
         pygame.draw.rect(self.screen, (22, 27, 26), (0, 0, SCREEN_WIDTH, HUD_HEIGHT))
         pygame.draw.line(self.screen, (88, 96, 91), (0, HUD_HEIGHT - 1), (SCREEN_WIDTH, HUD_HEIGHT - 1), 2)
@@ -1199,15 +1434,18 @@ class Game:
         monster_state = "нет"
         if self.player.monster_timer > 0:
             if self.player.stone_mode:
-                monster_state = "камень (G — выйти)"
+                monster_state = "камень (1–8 расширить, Shift+1–8 сжать, G — выйти)"
             elif self.player.stone_transition > 0:
                 monster_state = f"окаменение {math.ceil(self.player.stone_transition)}с"
             else:
-                monster_state = "активен (G — камень)"
+                monster_state = "активен (G — камень, клик по миникарте — луч)"
         monster = self.font.render(f"Монстр: {monster_state}", True, (203, 92, 255) if self.player.monster_timer > 0 else TEXT)
         self.screen.blit(monster, (380, 29))
 
-        next_power = self.font.render(f"Усиление: {max(0, int(self.powerup_timer))} c", True, TEXT)
+        channel_text = ""
+        if self.powerup_channel is not None:
+            channel_text = f" | Луч: {max(0.0, POWERUP_CHANNEL_TIME - self.powerup_channel.timer):.1f} c"
+        next_power = self.font.render(f"Усиление: {max(0, int(self.powerup_timer))} c{channel_text}", True, TEXT)
         self.screen.blit(next_power, (690, 17))
 
         if self.message_timer > 0:
@@ -1215,11 +1453,11 @@ class Game:
             self.screen.blit(msg, (SCREEN_WIDTH - msg.get_width() - 24, 17))
 
     def draw_minimap(self, camera):
-        width, height = 190, 140
-        left = SCREEN_WIDTH - width - 18
-        top = SCREEN_HEIGHT - height - 18
-        pygame.draw.rect(self.screen, (20, 24, 23), (left, top, width, height))
-        pygame.draw.rect(self.screen, (104, 112, 106), (left, top, width, height), 2)
+        minimap = self.minimap_rect()
+        width, height = minimap.size
+        left, top = minimap.topleft
+        pygame.draw.rect(self.screen, (20, 24, 23), minimap)
+        pygame.draw.rect(self.screen, (104, 112, 106), minimap, 2)
 
         scale_x = width / WORLD_WIDTH
         scale_y = height / WORLD_HEIGHT
@@ -1236,12 +1474,17 @@ class Game:
                 continue
             x = left + int(tank.pos.x * scale_x)
             y = top + int(tank.pos.y * scale_y)
-            pygame.draw.circle(self.screen, TEAM_COLORS[tank.team], (x, y), 3 if not tank.is_player else 5)
+            if self.is_stone_wall(tank):
+                pygame.draw.rect(self.screen, OBSTACLE_EDGE, (x - 4, y - 4, 8, 8))
+            else:
+                pygame.draw.circle(self.screen, TEAM_COLORS[tank.team], (x, y), 3 if not tank.is_player else 5)
 
         for powerup in self.powerups:
             x = left + int(powerup.rect.centerx * scale_x)
             y = top + int(powerup.rect.centery * scale_y)
-            pygame.draw.rect(self.screen, YELLOW, (x - 2, y - 2, 4, 4))
+            color = POWERUP_INFO[powerup.kind][1]
+            size = 6 if self.powerup_channel is not None and self.powerup_channel.target is powerup else 4
+            pygame.draw.rect(self.screen, color if size > 4 else YELLOW, (x - size // 2, y - size // 2, size, size))
 
     def flash(self, text):
         self.message = text
