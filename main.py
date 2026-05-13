@@ -743,6 +743,7 @@ class Game:
 
 
     def handle_stone_resize_key(self, event):
+<<<<<<< codex/add-monster-wall-transformation-and-abilities-ru354q
         resize_actions = {
             pygame.K_1: ("north", "expand"),
             pygame.K_2: ("south", "expand"),
@@ -767,10 +768,37 @@ class Game:
         self.adjust_stone_wall(self.player, boundary, action)
 
     def adjust_stone_wall(self, tank, boundary, action):
+=======
+        directions = {
+            pygame.K_1: pygame.Vector2(0, -1),
+            pygame.K_2: pygame.Vector2(1, -1),
+            pygame.K_3: pygame.Vector2(1, 0),
+            pygame.K_4: pygame.Vector2(1, 1),
+            pygame.K_5: pygame.Vector2(0, 1),
+            pygame.K_6: pygame.Vector2(-1, 1),
+            pygame.K_7: pygame.Vector2(-1, 0),
+            pygame.K_8: pygame.Vector2(-1, -1),
+            pygame.K_KP1: pygame.Vector2(0, -1),
+            pygame.K_KP2: pygame.Vector2(1, -1),
+            pygame.K_KP3: pygame.Vector2(1, 0),
+            pygame.K_KP4: pygame.Vector2(1, 1),
+            pygame.K_KP5: pygame.Vector2(0, 1),
+            pygame.K_KP6: pygame.Vector2(-1, 1),
+            pygame.K_KP7: pygame.Vector2(-1, 0),
+            pygame.K_KP8: pygame.Vector2(-1, -1),
+        }
+        if event.key not in directions:
+            return
+        expand = not (pygame.key.get_mods() & pygame.KMOD_SHIFT)
+        self.adjust_stone_wall(self.player, directions[event.key], expand)
+
+    def adjust_stone_wall(self, tank, direction, expand=True):
+>>>>>>> main
         if not self.is_stone_wall(tank):
             return
 
         rect = tank.rect
+<<<<<<< codex/add-monster-wall-transformation-and-abilities-ru354q
         if boundary == "north":
             rect.top += -STONE_RESIZE_STEP if action == "expand" else STONE_RESIZE_STEP
         elif boundary == "south":
@@ -780,6 +808,19 @@ class Game:
         elif boundary == "west":
             rect.left += -STONE_RESIZE_STEP if action == "expand" else STONE_RESIZE_STEP
 
+=======
+        step = STONE_RESIZE_STEP if expand else -STONE_RESIZE_STEP
+        if direction.x < 0:
+            rect.left -= step
+        elif direction.x > 0:
+            rect.right += step
+        if direction.y < 0:
+            rect.top -= step
+        elif direction.y > 0:
+            rect.bottom += step
+
+        rect.normalize()
+>>>>>>> main
         if rect.width < STONE_MIN_SIZE or rect.height < STONE_MIN_SIZE:
             self.flash("Каменная стена уже минимальна")
             return
@@ -787,14 +828,23 @@ class Game:
             self.flash("Граница мира не даёт изменить стену")
             return
         if any(rect.colliderect(other.rect) for other in self.tanks if other is not tank and other.alive):
+<<<<<<< codex/add-monster-wall-transformation-and-abilities-ru354q
             self.flash("Нельзя менять стену сквозь танк")
+=======
+            self.flash("Нельзя расширить стену сквозь танк")
+>>>>>>> main
             return
 
         tank.stone_rect = rect
         tank.pos = pygame.Vector2(rect.center)
+<<<<<<< codex/add-monster-wall-transformation-and-abilities-ru354q
         boundary_names = {"north": "северная", "south": "южная", "east": "восточная", "west": "западная"}
         action_text = "вытянута" if action == "expand" else "втянута"
         self.flash(f"{boundary_names[boundary].capitalize()} граница {action_text}")
+=======
+        action = "расширилась" if expand else "сжалась"
+        self.flash(f"Каменная стена {action}")
+>>>>>>> main
 
     def toggle_stone_mode(self, tank):
         if not tank.alive or tank.monster_timer <= 0:
@@ -1451,7 +1501,11 @@ class Game:
         monster_state = "нет"
         if self.player.monster_timer > 0:
             if self.player.stone_mode:
+<<<<<<< codex/add-monster-wall-transformation-and-abilities-ru354q
                 monster_state = "камень (WASD двигать, 1–4 вытянуть, 5–8 втянуть)"
+=======
+                monster_state = "камень (1–8 расширить, Shift+1–8 сжать, G — выйти)"
+>>>>>>> main
             elif self.player.stone_transition > 0:
                 monster_state = f"окаменение {math.ceil(self.player.stone_transition)}с"
             else:
