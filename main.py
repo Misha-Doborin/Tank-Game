@@ -21,8 +21,8 @@ TEAM_COLORS = {
     RED: (224, 66, 66),
 }
 
-BACKGROUND = (37, 45, 43)
-GRID = (48, 58, 55)
+BACKGROUND = (50, 122, 56)
+GRID = (66, 148, 74)
 OBSTACLE = (83, 88, 82)
 OBSTACLE_EDGE = (125, 132, 124)
 TEXT = (236, 241, 235)
@@ -106,15 +106,18 @@ class PowerUpParticle:
 
 
 class Tank:
-    def __init__(self, team, pos, is_player=False, temporary=False):
+    def __init__(self, team, pos, is_player=False, temporary=False, role="subordinate", commander=None):
         self.team = team
         self.pos = pygame.Vector2(pos)
         self.is_player = is_player
         self.temporary = temporary
         self.direction = pygame.Vector2(0, -1 if team == BLUE else 1)
-        self.speed = 145.0
-        self.max_hp = 4
-        self.hp = self.max_hp
+        self.speed = 220.0
+        self.role = role
+        self.commander = commander
+        self.commander_target = None
+        self.command_radius = 99999
+        self.set_role_stats()
         self.cooldown = random.uniform(0.2, 1.0)
         self.ai_change_timer = 0.0
         self.ai_move = pygame.Vector2()
@@ -142,6 +145,22 @@ class Tank:
         self.stone_mode = False
         self.stone_transition = 0.0
         self.stone_rect = None
+        self.recoil_timer = 0.0
+
+    def set_role_stats(self):
+        if self.role == "general":
+            self.max_hp = 20
+            self.damage_mult = 2.2
+            self.speed = 240.0
+        elif self.role == "marshal":
+            self.max_hp = 12
+            self.damage_mult = 1.5
+            self.speed = 228.0
+        else:
+            self.max_hp = 7
+            self.damage_mult = 1.0
+            self.speed = 220.0
+        self.hp = self.max_hp
 
     @property
     def alive(self):
@@ -188,12 +207,14 @@ class Tank:
 
     @property
     def bullet_damage(self):
-        return 2 if self.monster_timer > 0 else 1
+        base = 2 if self.monster_timer > 0 else 1
+        return max(1, int(round(base * self.damage_mult)))
 
     def update_timers(self, dt):
         was_monster = self.monster_timer > 0
         was_warping = self.turbo_warp_timer > 0
         self.cooldown = max(0.0, self.cooldown - dt)
+        self.recoil_timer = max(0.0, self.recoil_timer - dt)
         self.teleport_cooldown = max(0.0, self.teleport_cooldown - dt)
         self.rocket_cooldown = max(0.0, self.rocket_cooldown - dt)
         self.bile_cooldown = max(0.0, self.bile_cooldown - dt)
@@ -235,6 +256,8 @@ class Tank:
             return
 
         rect = self.rect.move(-camera.x, -camera.y + HUD_HEIGHT)
+        if self.recoil_timer > 0:
+            rect = rect.move(int(-self.direction.x * 5), int(-self.direction.y * 5))
         now = pygame.time.get_ticks() / 1000.0
         if self.stone_mode:
             pygame.draw.rect(surface, OBSTACLE, rect, border_radius=5)
@@ -343,6 +366,8 @@ class Tank:
         pygame.draw.rect(surface, (91, 225, 111), (hp_back.x, hp_back.y, int(hp_w * self.hp / self.max_hp), 5))
 
         labels = []
+        role_name = {"general":"ГЕНЕРАЛ","marshal":"МАРШАЛ","subordinate":"БОЕЦ"}.get(self.role,"БОЕЦ")
+        labels.append((role_name, (245,246,220)))
         if self.is_player:
             labels.append(("ИГРОК", TEXT))
         if self.monster_timer > 0:
@@ -402,13 +427,15 @@ class Game:
         return obstacles
 
     def spawn_initial_tanks(self):
-        blue_spawns = [(250, 250), (360, 380), (520, 260)]
+        blue_spawns = [(250, 250), (330, 320), (420, 260), (510, 320), (600, 250)]
         red_spawns = [
             (WORLD_WIDTH - 250, WORLD_HEIGHT - 250),
-            (WORLD_WIDTH - 380, WORLD_HEIGHT - 410),
-            (WORLD_WIDTH - 560, WORLD_HEIGHT - 280),
+            (WORLD_WIDTH - 340, WORLD_HEIGHT - 330),
+            (WORLD_WIDTH - 430, WORLD_HEIGHT - 250),
+            (WORLD_WIDTH - 520, WORLD_HEIGHT - 330),
+            (WORLD_WIDTH - 610, WORLD_HEIGHT - 250),
         ]
-        player_tank = Tank(BLUE, blue_spawns[0], is_player=True)
+        player_tank = Tank(BLUE, blue_spawns[0], is_player=True, role="general")
         player_tank.monster_timer = MONSTER_START_TIMER
         player_tank.monster_permanent = True
         player_tank.max_hp = MONSTER_MAX_HP
@@ -416,10 +443,20 @@ class Game:
         self.tanks.append(player_tank)
         self.spawn_powerup_burst(player_tank.pos, "monster")
         self.flash("Игрок получил Монстра до первой смерти. G — окаменение")
-        for pos in blue_spawns[1:]:
-            self.tanks.append(Tank(BLUE, pos))
-        for pos in red_spawns:
-            self.tanks.append(Tank(RED, pos))
+        blue_marshal = Tank(BLUE, blue_spawns[1], role="marshal", commander=player_tank)
+        self.tanks.append(blue_marshal)
+        self.tanks.append(Tank(BLUE, blue_spawns[2], commander=player_tank))
+        self.tanks.append(Tank(BLUE, blue_spawns[3], commander=player_tank))
+        self.tanks.append(Tank(BLUE, blue_spawns[4], commander=blue_marshal))
+
+        red_general = Tank(RED, red_spawns[0], role="general")
+        self.tanks.append(red_general)
+        red_marshals=[]
+        for pos in red_spawns[1:4]:
+            m=Tank(RED,pos,role="marshal", commander=red_general)
+            red_marshals.append(m)
+            self.tanks.append(m)
+        self.tanks.append(Tank(RED, red_spawns[4], commander=red_marshals[0]))
 
     @property
     def player(self):
@@ -447,6 +484,10 @@ class Game:
                 self.try_spray_bile(self.player)
             if event.type == pygame.KEYDOWN and event.key == pygame.K_g:
                 self.toggle_stone_mode(self.player)
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_q:
+                self.general_recall_marshals(self.player)
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_e:
+                self.general_release_marshals(self.player)
             if event.type == pygame.KEYDOWN:
                 self.handle_stone_resize_key(event)
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -505,7 +546,11 @@ class Game:
 
         threat = self.incoming_bullet_threat(tank)
         aim_direction = self.ai_aim_direction(tank, target)
-        if aim_direction is not None and distance < 820:
+        if tank.role == "subordinate" and tank.commander is not None and tank.commander_target is not None and tank.commander_target.alive:
+            target = tank.commander_target
+            tank.direction = (target.pos - tank.pos).normalize() if target.pos != tank.pos else tank.direction
+            self.spawn_command_shot(tank, target)
+        elif aim_direction is not None and distance < 820:
             tank.direction = aim_direction
             self.try_shoot(tank)
             if tank.monster_timer > 0:
@@ -819,7 +864,28 @@ class Game:
         speed = 560 if tank.monster_timer <= 0 else 680
         muzzle = tank.pos + tank.direction * (tank.size * 0.72)
         self.bullets.append(Bullet(muzzle, tank.direction * speed, tank.team, tank.bullet_damage))
+        tank.recoil_timer = 0.15
         tank.cooldown = tank.shoot_delay
+        self.commander_fire_sync(tank)
+
+    def spawn_command_shot(self, tank, target):
+        dirv = (target.pos - tank.pos)
+        if dirv.length_squared() == 0:
+            return
+        dirv = dirv.normalize()
+        muzzle = tank.pos + dirv * (tank.size * 0.72)
+        self.bullets.append(Bullet(muzzle, dirv * 900, tank.team, tank.bullet_damage))
+        tank.recoil_timer = 0.12
+
+    def commander_fire_sync(self, commander):
+        enemies=[t for t in self.tanks if t.team!=commander.team and t.alive]
+        if not enemies:
+            return
+        target=min(enemies,key=lambda e: commander.pos.distance_squared_to(e.pos))
+        commander.commander_target = target
+        for tank in self.tanks:
+            if tank.commander is commander and tank.alive:
+                tank.commander_target = target
 
     def try_monster_teleport(self, tank):
         if tank.stone_mode or tank.stone_transition > 0:
@@ -1033,7 +1099,10 @@ class Game:
                 continue
             for powerup in list(self.powerups):
                 if tank.rect.colliderect(powerup.rect):
-                    self.collect_powerup(tank, powerup)
+                    if tank.role == "subordinate" and tank.commander is not None:
+                        self.collect_powerup(tank.commander, powerup)
+                    else:
+                        self.collect_powerup(tank, powerup)
 
 
     def collect_powerup(self, tank, powerup):
@@ -1366,6 +1435,7 @@ class Game:
                 label = self.font.render(name, True, TEXT)
                 self.screen.blit(label, (rect.centerx - label.get_width() // 2, rect.bottom + 5))
 
+
         self.draw_powerup_channel(camera, world_view)
 
         for particle in self.powerup_particles:
@@ -1437,6 +1507,26 @@ class Game:
         pygame.draw.ellipse(self.screen, (203, 92, 255), halo, 3)
         label = self.font.render(f"{max(0.0, POWERUP_CHANNEL_TIME - channel.timer):.1f}с", True, (245, 246, 220))
         self.screen.blit(label, (target_rect.centerx - label.get_width() // 2, target_rect.top - 24))
+
+    def general_recall_marshals(self, general):
+        if general.role != "general":
+            return
+        for t in self.tanks:
+            if t.team == general.team and t is not general:
+                t.commander = general
+                t.pos = general.pos + pygame.Vector2(random.randint(-70,70), random.randint(-70,70))
+        self.flash("Генерал созвал всех маршалов и бойцов")
+
+    def general_release_marshals(self, general):
+        if general.role != "general":
+            return
+        marshals = [t for t in self.tanks if t.team == general.team and t.role == "marshal"]
+        subs = [t for t in self.tanks if t.team == general.team and t.role == "subordinate"]
+        for i,m in enumerate(marshals):
+            m.commander = general
+            if i < len(subs):
+                subs[i].commander = m
+        self.flash("Генерал отпустил маршалов")
 
     def draw_hud(self):
         pygame.draw.rect(self.screen, (22, 27, 26), (0, 0, SCREEN_WIDTH, HUD_HEIGHT))
