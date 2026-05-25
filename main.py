@@ -149,16 +149,16 @@ class Tank:
 
     def set_role_stats(self):
         if self.role == "general":
-            self.max_hp = 20
-            self.damage_mult = 2.2
+            self.max_hp = 100
+            self.damage_mult = 20.0
             self.speed = 240.0
         elif self.role == "marshal":
-            self.max_hp = 12
-            self.damage_mult = 1.5
+            self.max_hp = 90
+            self.damage_mult = 15.0
             self.speed = 228.0
         else:
-            self.max_hp = 7
-            self.damage_mult = 1.0
+            self.max_hp = 60
+            self.damage_mult = 12.5
             self.speed = 220.0
         self.hp = self.max_hp
 
@@ -203,7 +203,7 @@ class Tank:
     def shoot_delay(self):
         if self.rapid_timer > 0:
             return 0.28
-        return 0.75 if self.is_player else 1.05
+        return 1.05
 
     @property
     def bullet_damage(self):
@@ -231,7 +231,7 @@ class Tank:
         if was_warping and self.turbo_warp_timer <= 0:
             self.mega_speed_timer = 20.0
         if was_monster and self.monster_timer <= 0:
-            self.max_hp = 4
+            self.set_role_stats()
             self.hp = min(self.hp, self.max_hp)
         if self.monster_timer > 0:
             self.monster_regen_timer += dt
@@ -427,36 +427,31 @@ class Game:
         return obstacles
 
     def spawn_initial_tanks(self):
-        blue_spawns = [(250, 250), (330, 320), (420, 260), (510, 320), (600, 250)]
-        red_spawns = [
-            (WORLD_WIDTH - 250, WORLD_HEIGHT - 250),
-            (WORLD_WIDTH - 340, WORLD_HEIGHT - 330),
-            (WORLD_WIDTH - 430, WORLD_HEIGHT - 250),
-            (WORLD_WIDTH - 520, WORLD_HEIGHT - 330),
-            (WORLD_WIDTH - 610, WORLD_HEIGHT - 250),
-        ]
+        blue_spawns = [(250 + (i % 5) * 90, 250 + (i // 5) * 90) for i in range(10)]
+        red_spawns = [(WORLD_WIDTH - 250 - (i % 5) * 90, WORLD_HEIGHT - 250 - (i // 5) * 90) for i in range(10)]
+
         player_tank = Tank(BLUE, blue_spawns[0], is_player=True, role="general")
-        player_tank.monster_timer = MONSTER_START_TIMER
-        player_tank.monster_permanent = True
-        player_tank.max_hp = MONSTER_MAX_HP
-        player_tank.hp = MONSTER_MAX_HP
         self.tanks.append(player_tank)
-        self.spawn_powerup_burst(player_tank.pos, "monster")
-        self.flash("Игрок получил Монстра до первой смерти. G — окаменение")
-        blue_marshal = Tank(BLUE, blue_spawns[1], role="marshal", commander=player_tank)
-        self.tanks.append(blue_marshal)
-        self.tanks.append(Tank(BLUE, blue_spawns[2], commander=player_tank))
-        self.tanks.append(Tank(BLUE, blue_spawns[3], commander=player_tank))
-        self.tanks.append(Tank(BLUE, blue_spawns[4], commander=blue_marshal))
+
+        blue_marshals = []
+        for i in range(1, 4):
+            m = Tank(BLUE, blue_spawns[i], role="marshal", commander=player_tank)
+            blue_marshals.append(m)
+            self.tanks.append(m)
+        for i in range(4, 10):
+            commander = blue_marshals[(i - 4) % len(blue_marshals)]
+            self.tanks.append(Tank(BLUE, blue_spawns[i], commander=commander))
 
         red_general = Tank(RED, red_spawns[0], role="general")
         self.tanks.append(red_general)
-        red_marshals=[]
-        for pos in red_spawns[1:4]:
-            m=Tank(RED,pos,role="marshal", commander=red_general)
+        red_marshals = []
+        for i in range(1, 4):
+            m = Tank(RED, red_spawns[i], role="marshal", commander=red_general)
             red_marshals.append(m)
             self.tanks.append(m)
-        self.tanks.append(Tank(RED, red_spawns[4], commander=red_marshals[0]))
+        for i in range(4, 10):
+            commander = red_marshals[(i - 4) % len(red_marshals)]
+            self.tanks.append(Tank(RED, red_spawns[i], commander=commander))
 
     @property
     def player(self):
@@ -548,8 +543,11 @@ class Game:
         aim_direction = self.ai_aim_direction(tank, target)
         if tank.role == "subordinate" and tank.commander is not None and tank.commander_target is not None and tank.commander_target.alive:
             target = tank.commander_target
-            tank.direction = (target.pos - tank.pos).normalize() if target.pos != tank.pos else tank.direction
-            self.spawn_command_shot(tank, target)
+            to_enemy = target.pos - tank.pos
+            if to_enemy.length_squared() > 0:
+                tank.direction = to_enemy.normalize()
+            if self.commander_has_clean_shot(tank.commander, target):
+                self.try_shoot(tank)
         elif aim_direction is not None and distance < 820:
             tank.direction = aim_direction
             self.try_shoot(tank)
@@ -565,6 +563,13 @@ class Game:
                 self.try_monster_teleport(tank)
 
         powerup = self.choose_ai_powerup(tank, target)
+
+        if tank.commander is not None and tank.commander.alive:
+            dist_to_commander = tank.pos.distance_to(tank.commander.pos)
+            if dist_to_commander > 220:
+                tank.ai_move = self.best_ai_direction(tank, tank.commander.pos, preferred_distance=140)
+            elif dist_to_commander < 90:
+                tank.ai_move = self.best_ai_direction(tank, tank.commander.pos, preferred_distance=120)
 
         tank.ai_change_timer -= dt
         if threat is not None:
@@ -869,13 +874,13 @@ class Game:
         self.commander_fire_sync(tank)
 
     def spawn_command_shot(self, tank, target):
-        dirv = (target.pos - tank.pos)
-        if dirv.length_squared() == 0:
-            return
-        dirv = dirv.normalize()
-        muzzle = tank.pos + dirv * (tank.size * 0.72)
-        self.bullets.append(Bullet(muzzle, dirv * 900, tank.team, tank.bullet_damage))
-        tank.recoil_timer = 0.12
+        return
+
+    def commander_has_clean_shot(self, commander, target):
+        if commander is None or not commander.alive or target is None or not target.alive:
+            return False
+        direction = self.cardinal_direction(target.pos - commander.pos)
+        return self.has_line_of_fire(commander.pos, target.pos, direction)
 
     def commander_fire_sync(self, commander):
         enemies=[t for t in self.tanks if t.team!=commander.team and t.alive]
